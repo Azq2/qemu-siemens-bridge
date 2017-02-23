@@ -6314,6 +6314,8 @@ static void arm_cpu_do_interrupt_aarch32(CPUState *cs)
     /* TODO: Vectored interrupt controller.  */
     switch (cs->exception_index) {
     case EXCP_UDEF:
+		printf("EXCP_UDEF\n");
+		
         new_mode = ARM_CPU_MODE_UND;
         addr = 0x04;
         mask = CPSR_I;
@@ -6333,6 +6335,8 @@ static void arm_cpu_do_interrupt_aarch32(CPUState *cs)
         env->exception.fsr = 2;
         /* Fall through to prefetch abort.  */
     case EXCP_PREFETCH_ABORT:
+		printf("EXCP_PREFETCH_ABORT\n");
+		
         A32_BANKED_CURRENT_REG_SET(env, ifsr, env->exception.fsr);
         A32_BANKED_CURRENT_REG_SET(env, ifar, env->exception.vaddress);
         qemu_log_mask(CPU_LOG_INT, "...with IFSR 0x%x IFAR 0x%x\n",
@@ -6343,6 +6347,12 @@ static void arm_cpu_do_interrupt_aarch32(CPUState *cs)
         offset = 4;
         break;
     case EXCP_DATA_ABORT:
+		printf("EXCP_DATA_ABORT: LR=%08X, PC=%08X\n", env->regs[14], env->regs[15]);
+		for (int i = 0; i < 14; ++i) {
+			printf("R%02d=%08X\n", i, env->regs[i]);
+		}
+		printf("\n");
+		exit(1);
         A32_BANKED_CURRENT_REG_SET(env, dfsr, env->exception.fsr);
         A32_BANKED_CURRENT_REG_SET(env, dfar, env->exception.vaddress);
         qemu_log_mask(CPU_LOG_INT, "...with DFSR 0x%x DFAR 0x%x\n",
@@ -7174,8 +7184,14 @@ static bool get_phys_addr_v5(CPUARMState *env, uint32_t address,
         goto do_fault;
     }
     *phys_ptr = phys_addr;
+    
+//    if (address != phys_addr)
+//		printf("get_phys_addr(%08X) = %08X\n", address, phys_addr);
+    
     return false;
 do_fault:
+	printf("MMU fault at %08X\n", address);
+	
     *fsr = code | (domain << 4);
     return true;
 }

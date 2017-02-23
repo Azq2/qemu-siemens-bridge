@@ -5,6 +5,7 @@
 #include "hw/sysbus.h"
 #include "hw/arm/arm.h"
 #include "hw/devices.h"
+#include "qemu/timer.h"
 #include "sysemu/sysemu.h"
 #include "hw/pci/pci.h"
 #include "hw/boards.h"
@@ -24,29 +25,20 @@
 #include "pmb8876/io_bridge.c"
 #include "pmb8876/cpu_tcm.c"
 
-static ARMCPU *cpu;
-static unsigned int PMB8876_IRQ_C[0xFF];
-static unsigned int irq_num = 0;
-static unsigned int irq_num_i = 0;
-static unsigned int _time = 0;
-static qemu_irq irq = NULL;
+#include "hw/arm/pmb8876/irq.h"
 
-static void exec_irq(unsigned int irq_n) {
-	if (irq_num != 0 || (cpsr_read(&cpu->env) & 0x80))
-		return;
-	
-	unsigned int action = 0;
-	cpu_physical_memory_read(0x2E38 + irq_n, &action, 1);
-	
-	irq_num = irq_n;
-	printf("exec_irq(%02X) %s (%s) [action=%d]\n", irq_n, (!(cpsr_read(&cpu->env) & 0x80)) ? "irq on" : "irq off", pmb8876_get_cpu_mode(&(cpu->env)), action);
-	qemu_irq_raise(irq);
-	return;
-	
-	if (!(cpu->env.uncached_cpsr & 0x80)) {
-		irq_num = irq_n;
-		qemu_irq_pulse(qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ));
-	}
+static ARMCPU *cpu;
+static qemu_irq pmb8876_irq[PMB8876_IRQS_NR];
+static QEMUTimer *gsm_tpu_timer;
+static struct {
+	unsigned int clc;
+	unsigned int con;
+} gsm_tpu;
+int xuj;
+
+static void gsm_tpu_timer_handler(void *opaque) {
+	qemu_set_irq(pmb8876_irq[0x77], 1);
+	timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000 * 1000);
 }
 
 // ================================================================= //
@@ -64,34 +56,69 @@ static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 	} else if (offset == PMB8876_USART0_RXB) {
 		return 0x55;
 	} else if (offset >= PMB8876_USART0_CLC && offset <= PMB8876_USART0_ICR) {
-		printf ("READ UNIMPL UART (%s) 0x%x\n", pmb8876_get_reg_name(offset), (int)offset);
-		return 0;
+		//printf ("READ UNIMPL UART (%s) 0x%x (from 0x%08X)\n", pmb8876_get_reg_name(offset), (int)offset, cpu->env.regs[15]);
 	}
-	unsigned int value = sie_bridge_read(offset);
+	
+	unsigned int value = sie_bridge_read(offset, cpu->env.regs[15]);
+	if (size !=  4) {
+		printf("Invalid size of read: %d (ADDR: %08lX, VALUE: %08X, PC: %08X)\n", size, (unsigned long) offset, value, cpu->env.regs[15]);
+		// exit(0);
+	}
+	
+//	printf("READ: %d (ADDR: %08X, VALUE: %08X, PC: %08X)\n", size, offset, value, cpu->env.regs[15]);
 	
 	if (offset == 0xF4400010)
 		return 0x80005003 |  0x10000000;
 	
-//	if (offset >= 0xf2800030 && offset <= 0xf28002a8)
-//		value = PMB8876_IRQ_C[(offset - 0xf2800030) / 4];
-	
-	if (offset == 0xF280001C) {
-		printf("get_irq(%02X)\n", irq_num);
-		value = 0x77;
+	if (size == 1) {
+		return value & 0xFF;
+	} else if (size == 2) {
+		return value & 0xFFFF;
+	} else if (size == 3) {
+		return value & 0xFFFFFF;
 	}
 	
-	unsigned int action = 0;
-	cpu_physical_memory_read(0xA8D95BCC, &action, 4);
-	
-	if (PMB8876_IRQ_C[0x77] && action) {
-		exec_irq(0x77);
-	}
-	++irq_num_i;
 	return value;
 }
 
 static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned size) {
 	offset += (unsigned int) opaque;
+	if (size !=  4) {
+		printf("Invalid size of write: %d (ADDR: %08lX, VALUE: %08lX, PC: %08X)\n", size, (unsigned long) offset, (unsigned long) value, cpu->env.regs[15]);
+		// exit(0);
+	}
+	
+	/* ====== GSM TPU ====== */
+	if (offset >= 0xF6400000 && offset <= 0xF64000FF) {
+		if (offset == 0xF6400000) {
+			gsm_tpu.clc = (uint32_t) value;
+		} else if (offset == 0xF64000F8) {
+			gsm_tpu.con = (uint32_t) value;
+			
+			if ((gsm_tpu.con & 0x1000) && gsm_tpu.con & 0x4000  && !xuj) {
+				xuj = 1;
+				timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000 * 1000 * 1000);
+			}
+			/*
+			printf("gsm_tpu.con update!\n");
+			if (gsm_tpu.con & 0x4000) {
+				printf("reset timer!\n");
+				qemu_set_irq(pmb8876_irq[0x77], 0);
+			}
+			
+			if ((gsm_tpu.con & 0x1000) && gsm_tpu.con & 0x4000) {
+				printf("tick timer!\n");
+				timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+			}
+			*/
+		}
+		
+	}
+	
+	if (offset == 0xF7600034) {
+	//	qemu_set_irq(pmb8876_irq[0x9B], 1);
+	}
+	/* ==================== */
 	
 //	printf ("WRITE (%s) 0x%x=0x%x [%s]\n", pmb8876_get_reg_name(offset), (int)offset, (int)value, pmb8876_get_cpu_mode(&cpu->env));
 	/* UART */
@@ -99,24 +126,14 @@ static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned s
 		return;
 	} else if (offset == PMB8876_USART0_TXB) {
 		// printf("%c", (char) (value & 0xFF));
-		printf("UART TX: %02lX\n", value & 0xFF);
+		printf("%c", (char) (value & 0xFF));
+	//	printf("UART TX: %02lX\n", value & 0xFF);
 		return;
 	} else if (offset >= PMB8876_USART0_CLC && offset <= PMB8876_USART0_ICR) {
-		printf ("WRITE UNIMPL UART (%s) 0x%x\n", pmb8876_get_reg_name(offset), (int)offset);
-		return;
+		// printf ("WRITE UNIMPL UART (%s) 0x%x\n", pmb8876_get_reg_name(offset), (int)offset);
 	}
 	
-	if (offset == 0xF2800014) {
-		printf("ack_irq(%02X)\n", irq_num);
-		qemu_irq_lower(irq);
-		irq_num = 0;
-	}
-	
-	if (offset >= 0xf2800030 && offset <= 0xf28002a8) {
-		PMB8876_IRQ_C[(offset - 0xf2800030) / 4] = value;
-	}
-	
-	return sie_bridge_write(offset, value);
+	sie_bridge_write(offset, value, cpu->env.regs[15]);
 }
 static const MemoryRegionOps pmb8876_common_io_opts = {
 	.read = cpu_io_read,
@@ -126,6 +143,7 @@ static const MemoryRegionOps pmb8876_common_io_opts = {
 // ================================================================= //
 
 static void versatile_init(MachineState *machine, int board_id) {
+	int i;
 	ObjectClass *cpu_oc;
 	Object *cpuobj;
 	DeviceState *dev, *sysctl;
@@ -154,8 +172,7 @@ static void versatile_init(MachineState *machine, int board_id) {
     qdev_prop_set_uint32(sysctl, "proc_id", 0x02000000);
     qdev_init_nofail(sysctl);
     sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, 0x10000000);
-	 
-	irq = qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ);
+	
 	//sysbus_init_irq(SYS_BUS_DEVICE(sysctl), &irq);
 	
 	/*
@@ -176,6 +193,7 @@ static void versatile_init(MachineState *machine, int board_id) {
     MemoryRegion *sdram = g_new(MemoryRegion, 1);
     MemoryRegion *io = g_new(MemoryRegion, 1);
     MemoryRegion *test = g_new(MemoryRegion, 1);
+    MemoryRegion *test2 = g_new(MemoryRegion, 1);
 	
 	// IO
 	memory_region_init_io(io, NULL, &pmb8876_common_io_opts, (void *) 0, "IO", 0xFFFF0000);
@@ -206,12 +224,25 @@ static void versatile_init(MachineState *machine, int board_id) {
 	memory_region_add_subregion(sysmem, 0xA8000000, sdram);
     
 	// test IO
-//	memory_region_init_io(test, NULL, &pmb8876_common_io_opts, (void *) 0xA8E2A580, "FLASH_IO", 0x8);
-//	memory_region_add_subregion(sysmem, 0xA0000000, test);
+//	memory_region_init_io(test, NULL, &pmb8876_common_io_opts, (void *) 0xA8D95B00, "FLASH_IO2", 0xFF);
+//	memory_region_add_subregion(sysmem, 0xA8D95B00, test);
     
-    // IRQ
-    memset(&PMB8876_IRQ_C, 0, sizeof(PMB8876_IRQ_C));
+	// test IO2
+//	memory_region_init_io(test2, NULL, &pmb8876_common_io_opts, (void *) 0xA8D9577C, "FLASH_IO3", 0x100);
+//	memory_region_add_subregion(sysmem, 0xA8D9577C, test2);
     
+    // Инициализация IRQ
+	dev = qdev_create(NULL, "pmb8876-intc");
+    qdev_init_nofail(dev);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, PMB8876_IRQ_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(DEVICE(cpu), ARM_CPU_IRQ));
+	
+	for (i = 0; i < PMB8876_IRQS_NR; i++)
+		pmb8876_irq[i] = qdev_get_gpio_in(dev, i);
+	
+	// GSM TPU
+	gsm_tpu_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, gsm_tpu_timer_handler, NULL);
+	
 	////////////////////////////////////////////////
 	//                   BOOT                     //
 	////////////////////////////////////////////////
@@ -222,9 +253,9 @@ static void versatile_init(MachineState *machine, int board_id) {
 		0x04, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x53, 0x49, 0x45, 0x4D, 0x45, 0x4E, 0x53, 0x5F, 0x42, 0x4F, 0x4F, 0x54, 0x43, 0x4F, 0x44, 0x45, 
 		0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 		
-		0x01, 0x04, 0x05, 0x00, 0x89, 0x00, 0x89 // normal mode
+		// 0x01, 0x04, 0x05, 0x00, 0x89, 0x00, 0x89 // normal mode
 		// 0x01, 0x04, 0x05, 0x00, 0x8B, 0x00, 0x8B // service mode
-		// 0x01, 0x04, 0x05, 0x80, 0x83, 0x00, 0x03 // burnin mode
+		0x01, 0x04, 0x05, 0x80, 0x83, 0x00, 0x03 // burnin mode
 	};
 	
 	cpu_physical_memory_write(0x82000, &boot, sizeof(boot));
@@ -241,6 +272,7 @@ static void versatile_init(MachineState *machine, int board_id) {
 		error_report("Failed to load firmware from EL71.bin");
 		exit(1);
 	}
+	
 	cpu_set_pc(CPU(cpu), 0x00400000);
 }
 
