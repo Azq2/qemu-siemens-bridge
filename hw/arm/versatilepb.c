@@ -37,8 +37,8 @@ static struct {
 int xuj;
 
 static void gsm_tpu_timer_handler(void *opaque) {
-	qemu_set_irq(pmb8876_irq[0x77], 1);
-	timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000 * 1000);
+//	qemu_set_irq(pmb8876_irq[0x77], 1);
+//	timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000 * 1000);
 }
 
 // ================================================================= //
@@ -46,6 +46,8 @@ static void gsm_tpu_timer_handler(void *opaque) {
 // ================================================================= //
 static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 	offset += (unsigned int) opaque;
+	
+	unsigned int value = sie_bridge_read(offset, cpu->env.regs[15]);
 	
 	if (offset == PMB8876_USART0_FCSTAT) {
 		return 2 | 4 | 1;
@@ -59,7 +61,6 @@ static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 		//printf ("READ UNIMPL UART (%s) 0x%x (from 0x%08X)\n", pmb8876_get_reg_name(offset), (int)offset, cpu->env.regs[15]);
 	}
 	
-	unsigned int value = sie_bridge_read(offset, cpu->env.regs[15]);
 	if (size !=  4) {
 		printf("Invalid size of read: %d (ADDR: %08lX, VALUE: %08X, PC: %08X)\n", size, (unsigned long) offset, value, cpu->env.regs[15]);
 		// exit(0);
@@ -68,7 +69,7 @@ static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 //	printf("READ: %d (ADDR: %08X, VALUE: %08X, PC: %08X)\n", size, offset, value, cpu->env.regs[15]);
 	
 	if (offset == 0xF4400010)
-		return 0x80005003 |  0x10000000;
+		return (value & ~0xF0000000) | 0x10000000;
 	
 	if (size == 1) {
 		return value & 0xFF;
@@ -87,6 +88,9 @@ static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned s
 		printf("Invalid size of write: %d (ADDR: %08lX, VALUE: %08lX, PC: %08X)\n", size, (unsigned long) offset, (unsigned long) value, cpu->env.regs[15]);
 		// exit(0);
 	}
+	
+	if (offset == 0xF7600034)
+		qemu_set_irq(pmb8876_irq[0x9B], 1);
 	
 	/* ====== GSM TPU ====== */
 	if (offset >= 0xF6400000 && offset <= 0xF64000FF) {
@@ -195,6 +199,8 @@ static void versatile_init(MachineState *machine, int board_id) {
     MemoryRegion *test = g_new(MemoryRegion, 1);
     MemoryRegion *test2 = g_new(MemoryRegion, 1);
 	
+	int iphone_bb = 0;
+	
 	// IO
 	memory_region_init_io(io, NULL, &pmb8876_common_io_opts, (void *) 0, "IO", 0xFFFF0000);
 	memory_region_add_subregion(sysmem, 0x0, io);
@@ -211,21 +217,31 @@ static void versatile_init(MachineState *machine, int board_id) {
 	memory_region_allocate_system_memory(brom, NULL, "BROM", 0x100000);
 	memory_region_add_subregion(sysmem, 0x400000, brom);
 	
-	// FLASH
-	memory_region_allocate_system_memory(flash, NULL, "FLASH", 0x8000000 - 0x1000);
-	memory_region_add_subregion(sysmem, 0xA0001000, flash);
-    
-	// FLASH IO
-	memory_region_init_io(flash_io, NULL, &pmb8876_common_io_opts, (void *) 0xA0000000, "FLASH_IO", 0x1000);
-	memory_region_add_subregion(sysmem, 0xA0000000, flash_io);
-    
-	// SDRAM
-	memory_region_allocate_system_memory(sdram, NULL, "SDRAM", 0x01000000);
-	memory_region_add_subregion(sysmem, 0xA8000000, sdram);
+	if (iphone_bb) {
+		// FLASH
+		memory_region_allocate_system_memory(flash, NULL, "FLASH", 0x8000000 );
+		memory_region_add_subregion(sysmem, 0xA0000000, flash);
+		
+		// SDRAM
+		memory_region_allocate_system_memory(sdram, NULL, "SDRAM", 0x01000000);
+		memory_region_add_subregion(sysmem, 0xB0000000, sdram);
+	} else {
+		// FLASH
+		memory_region_allocate_system_memory(flash, NULL, "FLASH", 0x8000000 - 0x1000);
+		memory_region_add_subregion(sysmem, 0xA0001000, flash);
+		
+		// FLASH IO
+		memory_region_init_io(flash_io, NULL, &pmb8876_common_io_opts, (void *) 0xA0000000, "FLASH_IO", 0x1000);
+		memory_region_add_subregion(sysmem, 0xA0000000, flash_io);
+		
+		// SDRAM
+		memory_region_allocate_system_memory(sdram, NULL, "SDRAM", 0x01000000);
+		memory_region_add_subregion(sysmem, 0xA8000000, sdram);
+	}
     
 	// test IO
-//	memory_region_init_io(test, NULL, &pmb8876_common_io_opts, (void *) 0xA8D95B00, "FLASH_IO2", 0xFF);
-//	memory_region_add_subregion(sysmem, 0xA8D95B00, test);
+	memory_region_init_io(test, NULL, &pmb8876_common_io_opts, (void *) 0x2E38, "FLASH_IO2", 0xFF);
+	memory_region_add_subregion(sysmem, 0x2E38, test);
     
 	// test IO2
 //	memory_region_init_io(test2, NULL, &pmb8876_common_io_opts, (void *) 0xA8D9577C, "FLASH_IO3", 0x100);
@@ -266,8 +282,11 @@ static void versatile_init(MachineState *machine, int board_id) {
 		exit(1);
 	}
 	
-	// r = load_image_targphys("/home/azq2/dev/siemens/IPhone2G_BB.bin", 0xA0000000, 0x8000000);
-	r = load_image_targphys("/home/azq2/dev/siemens/ff/ff.bin", 0xA0000000, 0x8000000);
+	if (iphone_bb) {
+		r = load_image_targphys("/home/azq2/dev/siemens/IPhone2G_BB.bin", 0xA0000000, 0x8000000);
+	} else {
+		r = load_image_targphys("/home/azq2/dev/siemens/ff/ff.bin", 0xA0000000, 0x8000000);
+	}
 	if (r < 0) {
 		error_report("Failed to load firmware from EL71.bin");
 		exit(1);

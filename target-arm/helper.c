@@ -6314,7 +6314,12 @@ static void arm_cpu_do_interrupt_aarch32(CPUState *cs)
     /* TODO: Vectored interrupt controller.  */
     switch (cs->exception_index) {
     case EXCP_UDEF:
-		printf("EXCP_UDEF\n");
+		printf("EXCP_UDEF: LR=%08X, PC=%08X\n", env->regs[14], env->regs[15]);
+		for (int i = 0; i < 14; ++i) {
+			printf("R%02d=%08X\n", i, env->regs[i]);
+		}
+		printf("\n");
+		exit(1);
 		
         new_mode = ARM_CPU_MODE_UND;
         addr = 0x04;
