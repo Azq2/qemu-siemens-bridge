@@ -1,5 +1,5 @@
 
-static const char *pmb8876_get_reg_name(unsigned int addr) {
+const char *pmb8876_get_reg_name(unsigned int addr) {
 	struct PMB8876_REG_NAME *name = NULL;
 	unsigned int i;
 	for (i = 0; i < (sizeof(PMB8876_REGS_NAMES) / sizeof(PMB8876_REGS_NAMES[0])); ++i) {
@@ -12,7 +12,7 @@ static const char *pmb8876_get_reg_name(unsigned int addr) {
 	return name ? name->name : "UNKNOWN";
 }
 
-static const char *pmb8876_get_cpu_mode(CPUARMState *env) {
+const char *pmb8876_get_cpu_mode(CPUARMState *env) {
 	unsigned int mode = env->uncached_cpsr & 0x1f;
 	switch (mode) {
 		case ARM_CPU_MODE_USR:	return "USR";

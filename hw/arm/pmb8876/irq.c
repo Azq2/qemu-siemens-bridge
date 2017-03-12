@@ -149,7 +149,7 @@ static void irq_handler(void *opaque, int irq, int level) {
 	struct pmb8876_pic *p = (struct pmb8876_pic *) opaque;
 	
 	if (irq >= 0 && irq < PMB8876_IRQS_NR) {
-		if (!p->state[irq]) {
+		if (!p->state[irq] && p->prio[irq]) {
 			p->state[irq] = 1;
 			p->current = get_current_irq(p);
 		}

@@ -35,10 +35,15 @@ static struct {
 	unsigned int con;
 } gsm_tpu;
 int xuj;
+int xuj2 = 0;
 
 static void gsm_tpu_timer_handler(void *opaque) {
-//	qemu_set_irq(pmb8876_irq[0x77], 1);
-//	timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000 * 1000);
+	qemu_set_irq(pmb8876_irq[0x77], 1);
+	timer_mod(gsm_tpu_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000 * 1000);
+}
+
+const char *pmb8876_trigger_irq(int irq) {
+	qemu_set_irq(pmb8876_irq[irq], 1);
 }
 
 // ================================================================= //
@@ -88,8 +93,9 @@ static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned s
 		printf("Invalid size of write: %d (ADDR: %08lX, VALUE: %08lX, PC: %08X)\n", size, (unsigned long) offset, (unsigned long) value, cpu->env.regs[15]);
 		// exit(0);
 	}
-	
-	if (offset == 0xF7600034)
+
+#if 0
+	if (offset == 0xF43000D0)
 		qemu_set_irq(pmb8876_irq[0x9B], 1);
 	
 	/* ====== GSM TPU ====== */
@@ -116,21 +122,26 @@ static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned s
 			}
 			*/
 		}
-		
 	}
 	
 	if (offset == 0xF7600034) {
 	//	qemu_set_irq(pmb8876_irq[0x9B], 1);
 	}
 	/* ==================== */
-	
+#endif
+
 //	printf ("WRITE (%s) 0x%x=0x%x [%s]\n", pmb8876_get_reg_name(offset), (int)offset, (int)value, pmb8876_get_cpu_mode(&cpu->env));
 	/* UART */
 	if (offset == PMB8876_USART0_ICR) {
 		return;
 	} else if (offset == PMB8876_USART0_TXB) {
 		// printf("%c", (char) (value & 0xFF));
-		printf("%c", (char) (value & 0xFF));
+		char c = (value & 0xFF);
+		if (c == '\xFF' || c == '\xFE' || c == '\x10' || c == '\x11')
+			c = '\n';
+		fprintf(stderr, "%c", c);
+		
+	//	printf("TX: %02X (%c)\n", (value & 0xFF), (char) (value & 0xFF));
 	//	printf("UART TX: %02lX\n", value & 0xFF);
 		return;
 	} else if (offset >= PMB8876_USART0_CLC && offset <= PMB8876_USART0_ICR) {
@@ -240,12 +251,12 @@ static void versatile_init(MachineState *machine, int board_id) {
 	}
     
 	// test IO
-	memory_region_init_io(test, NULL, &pmb8876_common_io_opts, (void *) 0x2E38, "FLASH_IO2", 0xFF);
-	memory_region_add_subregion(sysmem, 0x2E38, test);
+	memory_region_init_io(test, NULL, &pmb8876_common_io_opts, (void *) 0xA8D95BA4, "FLASH_IO2", 4);
+	memory_region_add_subregion(sysmem, 0xA8D95BA4, test);
     
 	// test IO2
-//	memory_region_init_io(test2, NULL, &pmb8876_common_io_opts, (void *) 0xA8D9577C, "FLASH_IO3", 0x100);
-//	memory_region_add_subregion(sysmem, 0xA8D9577C, test2);
+	memory_region_init_io(test2, NULL, &pmb8876_common_io_opts, (void *) 0xA8D95BC8, "FLASH_IO3", 4);
+	memory_region_add_subregion(sysmem, 0xA8D95BC8, test2);
     
     // Инициализация IRQ
 	dev = qdev_create(NULL, "pmb8876-intc");
