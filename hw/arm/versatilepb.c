@@ -52,7 +52,7 @@ const char *pmb8876_trigger_irq(int irq) {
 static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 	offset += (unsigned int) opaque;
 	
-	unsigned int value = sie_bridge_read(offset, cpu->env.regs[15]);
+	unsigned int value = sie_bridge_read(offset, size, cpu->env.regs[15]);
 	
 	if (offset == PMB8876_USART0_FCSTAT) {
 		return 2 | 4 | 1;
@@ -67,22 +67,14 @@ static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 	}
 	
 	if (size !=  4) {
-		printf("Invalid size of read: %d (ADDR: %08lX, VALUE: %08X, PC: %08X)\n", size, (unsigned long) offset, value, cpu->env.regs[15]);
+	//	printf("Invalid size of read: %d (ADDR: %08lX, VALUE: %08X, PC: %08X)\n", size, (unsigned long) offset, value, cpu->env.regs[15]);
 		// exit(0);
 	}
 	
 //	printf("READ: %d (ADDR: %08X, VALUE: %08X, PC: %08X)\n", size, offset, value, cpu->env.regs[15]);
 	
-	if (offset == 0xF4400010)
-		return (value & ~0xF0000000) | 0x10000000;
-	
-	if (size == 1) {
-		return value & 0xFF;
-	} else if (size == 2) {
-		return value & 0xFFFF;
-	} else if (size == 3) {
-		return value & 0xFFFFFF;
-	}
+//	if (offset == 0xF4400010)
+//		return (value & ~0xF0000000) | 0x10000000;
 	
 	return value;
 }
@@ -90,7 +82,7 @@ static uint64_t cpu_io_read(void *opaque, hwaddr offset, unsigned size) {
 static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned size) {
 	offset += (unsigned int) opaque;
 	if (size !=  4) {
-		printf("Invalid size of write: %d (ADDR: %08lX, VALUE: %08lX, PC: %08X)\n", size, (unsigned long) offset, (unsigned long) value, cpu->env.regs[15]);
+	//	printf("Invalid size of write: %d (ADDR: %08lX, VALUE: %08lX, PC: %08X)\n", size, (unsigned long) offset, (unsigned long) value, cpu->env.regs[15]);
 		// exit(0);
 	}
 
@@ -148,7 +140,7 @@ static void cpu_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned s
 		// printf ("WRITE UNIMPL UART (%s) 0x%x\n", pmb8876_get_reg_name(offset), (int)offset);
 	}
 	
-	sie_bridge_write(offset, value, cpu->env.regs[15]);
+	sie_bridge_write(offset, size, value, cpu->env.regs[15]);
 }
 static const MemoryRegionOps pmb8876_common_io_opts = {
 	.read = cpu_io_read,
@@ -156,14 +148,303 @@ static const MemoryRegionOps pmb8876_common_io_opts = {
 	.endianness = DEVICE_NATIVE_ENDIAN,
 };
 // ================================================================= //
-
+//							FLASH BRIDGE							 //
+// ================================================================= //
+static int flash_wcyle = 0;
+static int flash_cmd = 0;
+static int flash_cmd_addr = 0;
+static int flash_count = 0;
+static uint64_t flash_io_read(void *opaque, hwaddr offset, unsigned size) {
+	MemoryRegion *flash = (MemoryRegion *) opaque;
+	offset += 0xA0000000;
+	
+	unsigned long value = sie_bridge_read(offset, size, cpu->env.regs[15]);
+	
+//	printf("FLASH IO READ[%ld]: %08lX from %08lX\n", size, value, offset);
+	
+	if (flash_wcyle == 1 && flash_cmd == 0x70) {
+		flash_wcyle = 0;
+		if (g_ignore_irq > 1) {
+			fprintf(stderr, "**** RESTORE IRQ: %02X\n", 0x77);
+			pmb8876_trigger_irq(0x77);
+		}
+		g_ignore_irq = 0;
+		memory_region_rom_device_set_romd(flash, true);
+	}
+	
+	return value;
+}
+static void flash_io_write(void *opaque, hwaddr offset, uint64_t value, unsigned size) {
+	MemoryRegion *flash = (MemoryRegion *) opaque;
+	offset += 0xA0000000;
+	
+//	printf("FLASH IO WRITE[%d]: %08lX to %08lX\n", size, value, offset);
+	sie_bridge_write(offset, size, value, cpu->env.regs[15]);
+	
+	if (!flash_wcyle) {
+		// Переводим память в режим IO
+		memory_region_rom_device_set_romd(flash, false);
+	}
+	
+	/* 1 write cycle */
+	if (flash_wcyle == 0) {
+		switch (value) {
+			case 0xF0:
+			case 0xFF:
+				fprintf(stderr, "[FLASH] Read Array\n");
+				goto xx_flash_reset;
+			case 0x70:
+				fprintf(stderr, "[FLASH] Read Status Register\n");
+			break;
+			case 0x90:
+				fprintf(stderr, "[FLASH] Read Electronic Signature\n");
+			break;
+			case 0x98:
+				fprintf(stderr, "[FLASH] Read CFI Query\n");
+			break;
+			case 0x50:
+				fprintf(stderr, "[FLASH] Clear Status Register\n");
+				goto xx_flash_reset;
+			case 0x20:
+				fprintf(stderr, "[FLASH] Block Erase\n");
+			break;
+			case 0x41:
+				fprintf(stderr, "[FLASH] Program\n");
+			break;
+			case 0xE9:
+				fprintf(stderr, "[FLASH] Buffer Program\n");
+			break;
+			case 0xB0:
+				fprintf(stderr, "[FLASH] Program/Erase Suspend\n");
+				goto xx_flash_reset;
+			case 0xD0:
+				fprintf(stderr, "[FLASH] Program/Erase Resume\n");
+				goto xx_flash_reset;
+			case 0xC0:
+				fprintf(stderr, "[FLASH] Protection Register Program\n");
+			break;
+			case 0x60:
+				fprintf(stderr, "[FLASH] Block lock/unlock\n");
+			break;
+			case 0xBC:
+				fprintf(stderr, "[FLASH] Blank Check\n");
+			break;
+			case 0x94:
+				fprintf(stderr, "[FLASH] Read EFA Block\n");
+			break;
+			case 0x44:
+				fprintf(stderr, "[FLASH] Program EFA Block\n");
+			break;
+			case 0x24:
+				fprintf(stderr, "[FLASH] Erase EFA Block\n");
+			break;
+			case 0x64:
+				fprintf(stderr, "[FLASH] EFA lock/unlock\n");
+			break;
+			default:
+				goto xx_flash_error;
+		}
+		++flash_wcyle;
+		flash_cmd = value;
+		flash_cmd_addr = offset;
+		g_ignore_irq = 1;
+	} else if (flash_wcyle == 1) {
+		switch (flash_cmd) {
+			case 0x98:
+				fprintf(stderr, "[FLASH] Exit Read CFI Query\n");
+				goto xx_flash_reset;
+			case 0x70:
+				fprintf(stderr, "[FLASH] Exit Read Status Register\n");
+				goto xx_flash_reset;
+			case 0x90:
+				fprintf(stderr, "[FLASH] Exit Read Electronic Signature\n");
+				goto xx_flash_reset;
+			case 0x20: /* Block erase */
+				if (value == 0xD0) { /* Confirm */
+					fprintf(stderr, "[FLASH] Block Erase Confirm\n");
+					goto xx_flash_reset;
+				} else if (value == 0xFF) { /* Read Array */
+					goto xx_flash_reset;
+				}
+				goto xx_flash_error;
+			break;
+			
+			case 0x41: /* Program */
+				fprintf(stderr, "[FLASH] Program Data (%04X)\n", value);
+				if (size != 2)
+					goto xx_flash_error;
+				
+				unsigned char *data = (unsigned char *) memory_region_get_ram_ptr(flash);
+				data[offset - 0xA0000000] = value & 0xFF;
+				data[offset - 0xA0000000 + 1] = (value >> 8) & 0xFF;
+				
+				goto xx_flash_reset;
+			break;
+			
+			case 0xE9: /* Buffer Program */
+				flash_count = (value + 1);
+				fprintf(stderr, "[FLASH] Buffer Program (size=%d)\n", flash_count);
+				++flash_wcyle;
+			break;
+			
+			case 0xC0: /* Protection Register Program */
+				fprintf(stderr, "[FLASH] Protection Register Program Data (%04X)\n", value);
+				goto xx_flash_error;
+			break;
+			
+			case 0x60: /* Block lock/unlock */
+				if (value == 0x01) {
+					fprintf(stderr, "[FLASH] Block Lock\n");
+				} else if (value == 0x03) {
+					fprintf(stderr, "[FLASH] Set Configuration Register (%08X=%08X)\n", flash_cmd_addr, offset);
+				} else if (value == 0x04) {
+					fprintf(stderr, "[FLASH] Set Enhanced Configuration Register\n");
+				} else if (value == 0xD0) {
+					fprintf(stderr, "[FLASH] Block Unlock\n");
+				} else if (value == 0x2F) {
+					fprintf(stderr, "[FLASH] Block Lock-Down\n");
+				} else {
+					fprintf(stderr, "[FLASH] Unknown Lock Cmd: %02X\n", value);
+				}
+				goto xx_flash_reset;
+			break;
+			
+			case 0x64: /* EFA lock/unlock */
+				if (value == 0x01) {
+					fprintf(stderr, "[FLASH] Lock EFA Block\n");
+				} else if (value == 0xD0) {
+					fprintf(stderr, "[FLASH] Unlock EFA Block\n");
+				} else if (value == 0x2F) {
+					fprintf(stderr, "[FLASH] Lock-Down EFA Block\n");
+				} else {
+					fprintf(stderr, "[FLASH] Unknown EFA Lock Cmd: %02X\n", value);
+				}
+				goto xx_flash_reset;
+			break;
+			
+			case 0xBC: /* Blank Check */
+				if (value == 0xD0) { /* Confirm */
+					fprintf(stderr, "[FLASH] Blank Check Confirm\n");
+					goto xx_flash_reset;
+				} else if (value == 0xFF) { /* Read Array */
+					goto xx_flash_reset;
+				}
+				goto xx_flash_error;
+			break;
+			
+			case 0x44: /* Program EFA Block */
+				fprintf(stderr, "[FLASH] Program EFA Block Data (%04X)\n", value);
+				goto xx_flash_reset;
+			break;
+			
+			case 0x24: /* Erase EFA Block */
+				if (value == 0xD0) { /* Confirm */
+					fprintf(stderr, "[FLASH] Erase EFA Block Confirm\n");
+					goto xx_flash_reset;
+				} else if (value == 0xFF) { /* Read Array */
+					goto xx_flash_reset;
+				}
+				goto xx_flash_error;
+			break;
+			
+			default:
+				goto xx_flash_error;
+		}
+	} else if (flash_wcyle == 2) {
+		switch (flash_cmd) {
+			case 0xE9: /* Buffer Program */
+			{
+				if (size != 2 && size != 4)
+					goto xx_flash_error;
+				
+				flash_count -= (size == 4 ? 2 : 1);
+				
+				if (!flash_count)
+					++flash_wcyle;
+				fprintf(stderr, "[FLASH] Buffer Program Write %08lX: %08lX\n", offset - 0xA0000000, value);
+				
+				unsigned char *data = (unsigned char *) memory_region_get_ram_ptr(flash);
+				if (size == 1) {
+					data[offset - 0xA0000000] = value;
+				} else if (size == 2) {
+					data[offset - 0xA0000000] = value & 0xFF;
+					data[offset - 0xA0000000 + 1] = (value >> 8) & 0xFF;
+				} else if (size == 3) {
+					data[offset - 0xA0000000] = value & 0xFF;
+					data[offset - 0xA0000000 + 1] = (value >> 8) & 0xFF;
+					data[offset - 0xA0000000 + 2] = (value >> 16) & 0xFF;
+				} else if (size == 4) {
+					data[offset - 0xA0000000] = value & 0xFF;
+					data[offset - 0xA0000000 + 1] = (value >> 8) & 0xFF;
+					data[offset - 0xA0000000 + 2] = (value >> 16) & 0xFF;
+					data[offset - 0xA0000000 + 3] = (value >> 24) & 0xFF;
+					
+					fprintf(
+						stderr, 
+						"=> %08X: %02X, %02X, %02X, %02X\n", 
+						offset - 0xA0000000, 
+						data[offset - 0xA0000000], 
+						data[offset - 0xA0000000 + 1], 
+						data[offset - 0xA0000000 + 2], 
+						data[offset - 0xA0000000 + 3]
+					);
+				}
+			}
+			break;
+			
+			default:
+				goto xx_flash_error;
+		}
+	} else if (flash_wcyle == 3) {
+		switch (flash_cmd) {
+			case 0xE9: /* Buffer Program */
+				if (value == 0xD0) { /* Confirm */
+					fprintf(stderr, "[FLASH] Buffer Program Confirm\n");
+					goto xx_flash_reset;
+				}
+				goto xx_flash_error;
+			break;
+			
+			default:
+				goto xx_flash_error;
+		}
+	} else {
+		// WTF?
+		goto xx_flash_error;
+	}
+	return;
+	
+xx_flash_error:
+	fprintf(stderr, "[FLASH] Invalid write %08X to %08X (wcycle=%d, cmd=%02X)\n", value, offset, flash_wcyle, flash_cmd);
+	exit(1);
+xx_flash_reset:
+	flash_wcyle = 0;
+	flash_cmd = 0;
+	
+	if (g_ignore_irq > 1) {
+		fprintf(stderr, "**** RESTORE IRQ: %02X\n", 0x77);
+		pmb8876_trigger_irq(0x77);
+	}
+	g_ignore_irq = 0;
+	
+	sie_bridge_write(offset, size, 0xFF, cpu->env.regs[15]);
+	
+	memory_region_rom_device_set_romd(flash, true);
+}
+static const MemoryRegionOps pmb8876_flash_io_opts = {
+	.read = flash_io_read,
+	.write = flash_io_write,
+	.endianness = DEVICE_NATIVE_ENDIAN,
+};
+// ================================================================= //
 static void versatile_init(MachineState *machine, int board_id) {
 	int i;
 	ObjectClass *cpu_oc;
 	Object *cpuobj;
 	DeviceState *dev, *sysctl;
 	MemoryRegion *sysmem = get_system_memory();
-	 
+	Error *err = NULL;
+	
 	if (!machine->cpu_model)
 		machine->cpu_model = "arm926";
 	
@@ -202,6 +483,7 @@ static void versatile_init(MachineState *machine, int board_id) {
 	*/
     MemoryRegion *sram1 = g_new(MemoryRegion, 1);
     MemoryRegion *sram2 = g_new(MemoryRegion, 1);
+    MemoryRegion *sram3 = g_new(MemoryRegion, 1);
     MemoryRegion *brom = g_new(MemoryRegion, 1);
     MemoryRegion *flash = g_new(MemoryRegion, 1);
     MemoryRegion *flash_io = g_new(MemoryRegion, 1);
@@ -209,6 +491,7 @@ static void versatile_init(MachineState *machine, int board_id) {
     MemoryRegion *io = g_new(MemoryRegion, 1);
     MemoryRegion *test = g_new(MemoryRegion, 1);
     MemoryRegion *test2 = g_new(MemoryRegion, 1);
+    MemoryRegion *test3 = g_new(MemoryRegion, 1);
 	
 	int iphone_bb = 0;
 	
@@ -224,6 +507,10 @@ static void versatile_init(MachineState *machine, int board_id) {
 	memory_region_allocate_system_memory(sram2, NULL, "SRAM2", 0x18000);
 	memory_region_add_subregion(sysmem, 0x80000, sram2);
 	
+	// SRAM2
+	memory_region_allocate_system_memory(sram3, NULL, "SRAM3", 0xFFFF);
+	memory_region_add_subregion(sysmem, 0xFFFF0000, sram3);
+	
 	// BootROM
 	memory_region_allocate_system_memory(brom, NULL, "BROM", 0x100000);
 	memory_region_add_subregion(sysmem, 0x400000, brom);
@@ -238,12 +525,75 @@ static void versatile_init(MachineState *machine, int board_id) {
 		memory_region_add_subregion(sysmem, 0xB0000000, sdram);
 	} else {
 		// FLASH
-		memory_region_allocate_system_memory(flash, NULL, "FLASH", 0x8000000 - 0x1000);
-		memory_region_add_subregion(sysmem, 0xA0001000, flash);
+	//	memory_region_allocate_system_memory(flash, NULL, "FLASH", 0x8000000 - 0x1000);
+	//	memory_region_add_subregion(sysmem, 0xA0001000, flash);
 		
 		// FLASH IO
-		memory_region_init_io(flash_io, NULL, &pmb8876_common_io_opts, (void *) 0xA0000000, "FLASH_IO", 0x1000);
-		memory_region_add_subregion(sysmem, 0xA0000000, flash_io);
+	//	memory_region_init_io(flash_io, NULL, &pmb8876_common_io_opts, (void *) 0xA0000000, "FLASH_IO", 0x1000);
+	//	memory_region_add_subregion(sysmem, 0xA0000000, flash_io);
+		
+		/*
+			SRAM1:0008AE1C		FLASH_TYPE <6, 0x89, 0x880F>; 1
+			SRAM1:0008AE1C		FLASH_TYPE <7, 0x89, 0x880D>; 2				// работает, потом падает по EEPROM
+			SRAM1:0008AE1C		FLASH_TYPE <8, 0x89, 0x8810>; 3
+			SRAM1:0008AE1C		FLASH_TYPE <0xB, 0x89, 0x887E>; 4			// работает сначала, потом падает qemu
+			SRAM1:0008AE1C		FLASH_TYPE <9, 0x89, 0x881C>; 5
+			SRAM1:0008AE1C		FLASH_TYPE <0xA, 0x89, 0x8819>; 6
+			SRAM1:0008AE1C		FLASH_TYPE <0xC, 0x20, 0x880D>; 7
+			SRAM1:0008AE1C		FLASH_TYPE <0xD, 0x20, 0x8810>; 8
+			SRAM1:0008AE1C		FLASH_TYPE <0xE, 0x20, 0x8819>; 9			// работает сначала, потом падает qemu
+			SRAM1:0008AE1C		FLASH_TYPE <0x10, 1, 0x22 7E 22 18>; 0xA
+			SRAM1:0008AE1C		FLASH_TYPE <0x12, 1, 0x22 7E 22 30>; 0xB
+			SRAM1:0008AE1C		FLASH_TYPE <0x13, 1, 0x227E2223>; 0xC
+			SRAM1:0008AE1C		FLASH_TYPE <0x14, 0xEC, 0x22FC0401>; 0xD
+			SRAM1:0008AE1C		FLASH_TYPE <0x15, 0xEC, 0x22FD0401>; 0xE
+			SRAM1:0008AE1C		FLASH_TYPE <0x16, 0x22, 0x8820>; 0xF
+		*/
+		DeviceState *dev = qdev_create(NULL, "cfi.pflash.0020:8819");
+		qdev_prop_set_uint32(dev, "num-blocks", 0x04000000 / 0x00040000);
+		qdev_prop_set_uint64(dev, "sector-length", 0x00040000);
+		qdev_prop_set_uint8(dev, "width", 2);
+		qdev_prop_set_bit(dev, "big-endian", false);
+		qdev_prop_set_uint16(dev, "id0", 0x00);
+		qdev_prop_set_uint16(dev, "id1", 0x20);
+		qdev_prop_set_uint16(dev, "id2", 0x88);
+		qdev_prop_set_uint16(dev, "id3", 0x19);
+		qdev_prop_set_string(dev, "name", "pflash");
+		
+		/* OTP0 */
+		uint8_t otp0[] = {
+			// ESN
+			0x99, 0x09, 0x29, 0x3D, 
+			0x02, 0x99, 0x02, 0x28
+		};
+		qdev_prop_set_uint16(dev, "otp0-lock", 0x0000); /* Locked */
+		qdev_prop_set_uint16(dev, "otp0-data-len", sizeof(otp0));
+		qdev_prop_set_ptr(dev, "otp0-data", otp0);
+		
+		/* OTP1 */
+		uint8_t otp1[] = {
+			// IMEI
+			0x53, 0x98, 0x14, 0x00, 
+			0x15, 0x02, 0x44, 0xFF
+		};
+		qdev_prop_set_uint16(dev, "otp1-lock", 0x0000); /* All Locked */
+		qdev_prop_set_uint16(dev, "otp1-data-len", sizeof(otp1));
+		qdev_prop_set_ptr(dev, "otp1-data", otp1);
+		
+		qdev_init_nofail(dev);
+		
+		memory_region_add_subregion(sysmem, 0xA0000000,
+			sysbus_mmio_get_region(SYS_BUS_DEVICE(dev), 0));
+
+//		pflash_cfi01_register(0xA0000000, NULL, "pflash", 0x04000000, NULL,
+//			0x00040000, 0x04000000 / 0x00040000, 2, 0x00, 0x20, 0x88, 0x19, 0);
+		
+	//	pflash_cfi02_register(0xA0000000, NULL, "pflash", 0x04000000, NULL, 
+	//		0x00040000, 0x04000000 / 0x00040000, 1, 2, 0x22, 0x7E, 0x22, 0x18, 0x555, 0xAAA, 0);
+		
+	//	memory_region_init_rom_device(flash, NULL, &pmb8876_flash_io_opts, (void *) flash,
+	//		"flash", 64 * 1024 * 1024, &err);
+	//	memory_region_add_subregion(sysmem, 0xA0000000, flash);
 		
 		// SDRAM
 		memory_region_allocate_system_memory(sdram, NULL, "SDRAM", 0x01000000);
@@ -257,6 +607,10 @@ static void versatile_init(MachineState *machine, int board_id) {
 	// test IO2
 	memory_region_init_io(test2, NULL, &pmb8876_common_io_opts, (void *) 0xA8D95BC8, "FLASH_IO3", 4);
 	memory_region_add_subregion(sysmem, 0xA8D95BC8, test2);
+    
+	// test IO2
+	memory_region_init_io(test3, NULL, &pmb8876_common_io_opts, (void *) 0xA8FB0060, "FLASH_IO3", 4);
+	memory_region_add_subregion(sysmem, 0xA8FB0060, test3);
     
     // Инициализация IRQ
 	dev = qdev_create(NULL, "pmb8876-intc");
@@ -281,8 +635,8 @@ static void versatile_init(MachineState *machine, int board_id) {
 		0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 		
 		// 0x01, 0x04, 0x05, 0x00, 0x89, 0x00, 0x89 // normal mode
-		// 0x01, 0x04, 0x05, 0x00, 0x8B, 0x00, 0x8B // service mode
-		0x01, 0x04, 0x05, 0x80, 0x83, 0x00, 0x03 // burnin mode
+		0x01, 0x04, 0x05, 0x00, 0x8B, 0x00, 0x8B // service mode
+		// 0x01, 0x04, 0x05, 0x80, 0x83, 0x00, 0x03 // burnin mode
 	};
 	
 	cpu_physical_memory_write(0x82000, &boot, sizeof(boot));
@@ -294,9 +648,9 @@ static void versatile_init(MachineState *machine, int board_id) {
 	}
 	
 	if (iphone_bb) {
-		r = load_image_targphys("/home/azq2/dev/siemens/IPhone2G_BB.bin", 0xA0000000, 0x8000000);
+		r = load_image_targphys("/home/azq2/dev/siemens/IPhone2G_BB.bin", 0xA0000000, 0x4000000);
 	} else {
-		r = load_image_targphys("/home/azq2/dev/siemens/ff/ff.bin", 0xA0000000, 0x8000000);
+		r = load_image_targphys("/home/azq2/mnt/ff_recalc.bin", 0xA0000000, 0x4000000);
 	}
 	if (r < 0) {
 		error_report("Failed to load firmware from EL71.bin");

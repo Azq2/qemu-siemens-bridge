@@ -8,8 +8,8 @@
 
 #define TYPE_PMB8876_INTC "pmb8876-intc"
 
-#define PMB8876_INTC_ERR(s, ...) fprintf(stderr, "[pmb8876-intc] " s, ##__VA_ARGS__);
-#define PMB8876_INTC_DBG(s, ...) printf("[pmb8876-intc] " s, ##__VA_ARGS__);
+#define PMB8876_INTC_ERR(s, ...) /*fprintf(stderr, "[pmb8876-intc] " s, ##__VA_ARGS__);*/
+#define PMB8876_INTC_DBG(s, ...) /*printf("[pmb8876-intc] " s, ##__VA_ARGS__);*/
 
 #define PMB8876_INTC(obj) OBJECT_CHECK(struct pmb8876_pic, (obj), TYPE_PMB8876_INTC)
 
@@ -84,7 +84,7 @@ static uint64_t pic_read(void *opaque, hwaddr haddr, unsigned size) {
 		break;
 	}
 	
-	unsigned int from_phone = sie_bridge_read((uint32_t) (PMB8876_IRQ_BASE + addr), cpu->env.regs[15]);
+	unsigned int from_phone = sie_bridge_read((uint32_t) (PMB8876_IRQ_BASE + addr), 4, cpu->env.regs[15]);
 	if (from_phone != value && addr != 0x1C) {
 		PMB8876_INTC_ERR("%08lX [irq=%02X]: Not sync: %08lX != %08X (from %08X)\n", addr + PMB8876_IRQ_BASE, (addr - 0x30) / 4, value, from_phone, cpu->env.regs[15]);
 		value = from_phone;
@@ -96,7 +96,7 @@ static void pic_write(void *opaque, hwaddr haddr, uint64_t val, unsigned size) {
 	ARMCPU *cpu = ARM_CPU(qemu_get_cpu(0));
 	uint64_t addr = (uint64_t) haddr;
 	
-	sie_bridge_write((uint32_t) (PMB8876_IRQ_BASE + addr), (uint32_t) val, cpu->env.regs[15]);
+	sie_bridge_write((uint32_t) (PMB8876_IRQ_BASE + addr), 4, (uint32_t) val, cpu->env.regs[15]);
 	
 	switch (addr) {
 		case 0x08: // FIQ_ACK

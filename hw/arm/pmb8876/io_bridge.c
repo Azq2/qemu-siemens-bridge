@@ -1,13 +1,16 @@
 
 static FILE *__sie_bridge_fp = NULL;
 
+static char cmd_w_size[] = {0, 'o', 'w', 'O', 'W'};
+static char cmd_r_size[] = {0, 'i', 'r', 'I', 'R'};
+
 static FILE *sie_bridge_fp(void) {
 	if (!__sie_bridge_fp)
 		__sie_bridge_fp = fopen("/dev/shm/siemens_io_sniff", "w+");
 	return __sie_bridge_fp;
 }
 
-void sie_bridge_write(unsigned int addr, unsigned int value, unsigned int from) {
+void sie_bridge_write(unsigned int addr, unsigned int size, unsigned int value, unsigned int from) {
 	if (from % 4 == 0)
 		from -= 4;
 	else
@@ -16,7 +19,7 @@ void sie_bridge_write(unsigned int addr, unsigned int value, unsigned int from) 
 	FILE *fp = sie_bridge_fp();
 	while (ftruncate(fileno(fp), 0) == 0) break;
 	fseek(fp, 0, SEEK_SET);
-	fwrite("W", 1, 1, fp);
+	fwrite(&cmd_w_size[size], 1, 1, fp);
 	fwrite(&addr, 4, 1, fp);
 	fwrite(&value, 4, 1, fp);
 	fwrite(&from, 4, 1, fp);
@@ -32,7 +35,7 @@ void sie_bridge_write(unsigned int addr, unsigned int value, unsigned int from) 
 			if (fread(&buf, 1, 1, fp) == 1) {
 				if (buf == 0x2B) { // IRQ
 					if (fread(&buf, 1, 1, fp) == 1) {
-						fprintf(stderr, "**** NEW IRQ: %02X\n", buf);
+					//	fprintf(stderr, "**** NEW IRQ: %02X\n", buf);
 						pmb8876_trigger_irq(buf);
 					} else {
 						fprintf(stderr, "%s(%08X, %08X, %08X): Read IRQ error\n", __func__, addr, value, from);
@@ -48,7 +51,7 @@ void sie_bridge_write(unsigned int addr, unsigned int value, unsigned int from) 
 	}
 }
 
-unsigned int sie_bridge_read(unsigned int addr, unsigned int from) {
+unsigned int sie_bridge_read(unsigned int addr, unsigned int size, unsigned int from) {
 	if (from % 4 == 0)
 		from -= 4;
 	else
@@ -57,7 +60,7 @@ unsigned int sie_bridge_read(unsigned int addr, unsigned int from) {
 	FILE *fp = sie_bridge_fp();
 	while (ftruncate(fileno(fp), 0) == 0) break;
 	fseek(fp, 0, SEEK_SET);
-	fwrite("R", 1, 1, fp);
+	fwrite(&cmd_r_size[size], 1, 1, fp);
 	fwrite(&addr, 4, 1, fp);
 	fwrite(&from, 4, 1, fp);
 	
@@ -73,7 +76,7 @@ unsigned int sie_bridge_read(unsigned int addr, unsigned int from) {
 			if (fread(buf, 5, 1, fp) == 1) {
 				if (buf[0] == 0x2B) { // IRQ
 					if (fread(&irq, 1, 1, fp) == 1) {
-						fprintf(stderr, "**** NEW IRQ: %02X\n", irq);
+					//	fprintf(stderr, "**** NEW IRQ: %02X\n", irq);
 						pmb8876_trigger_irq(irq);
 					} else {
 						fprintf(stderr, "%s(%08X, %08X): Read IRQ error\n", __func__, addr, from);
